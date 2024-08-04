@@ -1,10 +1,10 @@
-
 import asyncio
 
-from fasthtml import *
+from fasthtml.common import *
+import fasthtml.common
+import sse_starlette.sse
 
 import db.db as db
-
 
 def LobbyEntry(lobby: db.ScribbleLobby):
     return A(
@@ -144,10 +144,11 @@ def routes(app: FastHTML):
                         ], 
                         id="lobby-list",
                     ),
-                    hx_ext="ws", 
-                    ws_connect="/lobbys"
+                    sse_swap="lobbyList",
                 ),
             ),
+            hx_ext="sse", 
+            sse_connect="/lobbys",
             cls="uk-container uk-margin-top",
         )
     
@@ -181,29 +182,39 @@ def routes(app: FastHTML):
 
         return Response(None, status_code=201)
 
-    
-    async def on_lobbys_connect(send):
-        last_send_lobby_state = 0
-        while True:
-            if lobby_manager.get_state_id() != last_send_lobby_state:
-                await send(
-                    Div(
-                        *[
-                            LobbyEntry(lobby) 
-                            for lobby 
-                            in lobby_manager.get_lobbys()
-                        ], 
-                        id="lobby-list",
+
+    @app.get("/lobbys")
+    async def lobbys_sse(session, request):
+        if 'session_id' not in session:
+            return Response(None, status_code=401)
+        try:
+            session_entry: db.Session = db.Session.select().where(db.Session.session_id == session['session_id']).get()
+        except db.Session.DoesNotExist:
+            return Response(None, status_code=401)
+
+        async def event_generator():
+            last_send_lobby_state = 0
+            while True:
+                if await request.is_disconnected():
+                    break
+                if lobby_manager.get_state_id() != last_send_lobby_state:
+                    last_send_lobby_state = lobby_manager.get_state_id()
+                    yield sse_starlette.sse.ServerSentEvent(
+                        fasthtml.common.to_xml(
+                            Div(
+                                *[
+                                    LobbyEntry(lobby) 
+                                    for lobby 
+                                    in lobby_manager.get_lobbys()
+                                ], 
+                                id="lobby-list",
+                            ),
+                        ),
+                        event="lobbyList"
                     )
-                )
-                last_send_lobby_state = lobby_manager.get_state_id()
-            await asyncio.sleep(2)
+                await asyncio.sleep(0.5)
+        return sse_starlette.sse.EventSourceResponse(event_generator())
 
-    async def on_lobbys_disconnect():
-        print("Disconnected from lobby")
-
-    @app.ws("/lobbys", conn=on_lobbys_connect, disconn=on_lobbys_disconnect)
-    async def ws_lobbys(msg:str, send): pass
 
     @app.get("/lobbys/{lobby_id}")
     def get(session, lobby_id:int):
